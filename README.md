@@ -1,0 +1,2 @@
+# CmpDir
+compare directories
