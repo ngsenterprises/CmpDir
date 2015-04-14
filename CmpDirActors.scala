@@ -3,19 +3,23 @@ package com.ngs.cmp.Actors
 
 import java.io.{FileWriter, File}
 
-import akka.actor.SupervisorStrategy.{Escalate, Resume}
+import akka.actor.SupervisorStrategy.{Escalate, Resume, Restart}
 import akka.actor.{OneForOneStrategy, Actor, Props, ActorRef}
 import akka.routing.{RoundRobinRoutingLogic, Router, ActorRefRoutee}
 import com.typesafe.config.ConfigFactory
+import scala.collection.mutable
 import scala.io.Source
 import scala.util.control.NonFatal
-import scala.collection.mutable.{Queue, HashMap, ListBuffer}
+import scala.collection.mutable.{ListBuffer, Queue, HashMap}
+import scala.annotation._
 
 
 sealed trait CmpMsg
-case class CmpJobMsg(bas: File, cmp: File, cmds: HashMap[String, String]) extends CmpMsg
-case class CmpJobCompleteMsg(bas: File, cmp: File) extends CmpMsg
+case class CmpJobMsg(bas: File, cmp: File, cmds: HashMap[String, String], jobId: Int) extends CmpMsg
+case class CmpJobCompleteMsg(bas: File, cmp: File, jobId: Int) extends CmpMsg
 case object StopSystemMsg extends CmpMsg
+
+case class CmpJob(bas: File, trg: File)
 
 
 object CmpFileActor {
@@ -25,91 +29,106 @@ object CmpFileActor {
 class CmpFileActor extends Actor {
 
   def cmpFiles(bas: File, trg: File, cmds: HashMap[String, String]): Long = {
-    println("cmpFiles [" +bas.getAbsolutePath +"]" +" [" +trg.getAbsolutePath +"]")
+   //println("cmpFiles [" +bas.getAbsolutePath +"]" +" [" +trg.getAbsolutePath +"]")
+
     var error_count = 0
-    //if (bas.getName.compareTo("readme.txt") == 0)
-    //  println
-    if (bas.isFile && trg.isFile) {
-      val srcBas = Source.fromFile(bas).getLines
-      val srcTrg = Source.fromFile(trg).getLines
-      val wrt = new FileWriter(trg.getAbsolutePath + ".cmp")
 
-      var line_count = 0
-      //var error_count = 0
+    try {
+      if (bas.isFile && trg.isFile) {
+        val srcBas = Source.fromFile(bas).getLines
+        val srcTrg = Source.fromFile(trg).getLines
+        val wrt = new FileWriter(trg.getAbsolutePath + ".cmp")
 
-      val lineBas = new StringBuilder
-      val lineTrg = new StringBuilder
-      val suffix = bas.getAbsolutePath.split('.').last
+        var line_count = 0
+        val lineBas = new StringBuilder
+        val lineTrg = new StringBuilder
+        val suffix = bas.getAbsolutePath.split('.').last
 
-      val skip_hdr = cmds.contains("glb.fhdr") || cmds.contains(suffix + ".fhdr")
-      val start_line = cmds.getOrElse("glb.fstart", cmds.getOrElse(suffix + ".fstart", "0")).toLong
-      val max_lines = cmds.getOrElse("glb.flines", cmds.getOrElse(suffix + ".flines", Long.MaxValue.toString)).toLong
-      val max_errors = cmds.getOrElse("glb.ferror", cmds.getOrElse(suffix + ".ferror", Long.MaxValue.toString)).toLong
+        val skip_hdr = cmds.contains("glb.fhdr") || cmds.contains(suffix + ".fhdr")
+        val start_line = cmds.getOrElse("glb.fstart", cmds.getOrElse(suffix + ".fstart", "0")).toLong
+        val max_lines = cmds.getOrElse("glb.flines", cmds.getOrElse(suffix + ".flines", Long.MaxValue.toString)).toLong
+        val max_errors = cmds.getOrElse("glb.ferror", cmds.getOrElse(suffix + ".ferror", Long.MaxValue.toString)).toLong
 
-      def getBasStr: Boolean = {
-        if (srcBas.hasNext) {
-          lineBas.clear()
-          lineBas.append(srcBas.next)
-          true
-        } else false
-      }
-      def getTrgStr: Boolean = {
-        if (srcTrg.hasNext) {
-          lineTrg.clear()
-          lineTrg.append(srcTrg.next)
-          true
-        } else false
-      }
-
-      var bBas = getBasStr
-      var bTrg = getTrgStr
-
-      //skip header
-      if (skip_hdr) {
-        var done = false
-        while (bBas && !done) {
-          if (0 < lineBas.length && lineBas(0) != '#')
-            done = true
-          else
-            bBas = getBasStr
+        def getBasStr: Boolean = {
+          try {
+            if (srcBas.hasNext) {
+              lineBas.clear()
+              lineBas.append(srcBas.next)
+              true
+            } else false
+          } catch {
+            case NonFatal(e) => false
+            case e:Throwable => throw e
+          }
         }
-        done = false
-        while (bTrg && !done) {
-          if (0 < lineTrg.length && lineTrg(0) != '#')
-            done = true
-          else
-            bTrg = getTrgStr
+        def getTrgStr: Boolean = {
+          try {
+            if (srcTrg.hasNext) {
+              lineTrg.clear()
+              lineTrg.append(srcTrg.next)
+              true
+            } else false
+          } catch {
+            case NonFatal(e) => false
+            case e:Throwable => throw e
+          }
         }
-      }
 
-      //start line
-      while (line_count < start_line && bBas && bTrg) {
-        line_count += 1
-        bBas = getBasStr
-        bTrg = getTrgStr
-      }
+        var bBas = getBasStr
+        var bTrg = getTrgStr
 
-      while (line_count < max_lines && error_count < max_errors && bBas && bTrg) {
-        if (lineBas.compare(lineTrg.toString) != 0) {
-          wrt.write(line_count.toString + "\n")
-          wrt.write("[" + lineBas + "]\n")
-          wrt.write("[" + lineTrg + "]\n")
-          error_count += 1
+        //skip header
+        if (skip_hdr) {
+          var done = false
+          while (bBas && !done) {
+            if (0 < lineBas.length && lineBas(0) != '#')
+              done = true
+            else
+              bBas = getBasStr
+          }
+          done = false
+          while (bTrg && !done) {
+            if (0 < lineTrg.length && lineTrg(0) != '#')
+              done = true
+            else
+              bTrg = getTrgStr
+          }
         }
-        line_count += 1
-        bBas = getBasStr
-        bTrg = getTrgStr
+
+        //start line
+        while (line_count < start_line && bBas && bTrg) {
+          line_count += 1
+          bBas = getBasStr
+          bTrg = getTrgStr
+        }
+
+        while (line_count < max_lines && error_count < max_errors && bBas && bTrg) {
+          if (lineBas.compare(lineTrg.toString) != 0) {
+            wrt.write(line_count.toString + "\n")
+            wrt.write("[" + lineBas + "]\n")
+            wrt.write("[" + lineTrg + "]\n")
+            error_count += 1
+          }
+          line_count += 1
+          bBas = getBasStr
+          bTrg = getTrgStr
+        }
+        wrt.close
       }
-      wrt.close
+    } catch {
+      case NonFatal(e) => {
+        println("exception: " +e.toString)
+      }
     }
     error_count
   }
 
   def receive = {
-    case CmpJobMsg(bas, trg, cmds) => {
+    case CmpJobMsg(bas, trg, cmds, jobId) => {
       val orgSender = sender
+      //println("start job: " +jobId.toString)
       cmpFiles(bas, trg, cmds)
-      orgSender ! CmpJobCompleteMsg(bas, trg)
+      orgSender ! CmpJobCompleteMsg(bas, trg, jobId)
     }
   }
 }
@@ -119,8 +138,8 @@ object CmpSupervisor {
 }
 
 class CmpSupervisor extends Actor {
-  val config = ConfigFactory.load()
-  val numberOfActors = config.getInt("app.akka.numberOfActors")
+  //val config = ConfigFactory.load()
+  val numberOfActors = 7//config.getInt("app.akka.numberOfActors")
   var activeJobs = 0
   val jobQue = new Queue[CmpJobMsg]()
   var startTime = System.currentTimeMillis()
@@ -128,11 +147,11 @@ class CmpSupervisor extends Actor {
   override def supervisorStrategy =
     OneForOneStrategy() {
       case e: Exception if (NonFatal(e)) => {
-        println("supervisorStrategy RESUME " +e.toString)
-        Resume
+        println("supervisorStrategy RESTART." +e.toString)
+        Restart
       }
       case e => {
-        println("supervisorStrategy ESCALATE " +e.toString)
+        println("supervisorStrategy ESCALATE." +e.toString)
         Escalate
       }
     }
@@ -147,15 +166,16 @@ class CmpSupervisor extends Actor {
   }
 
   def receive = {
-    case CmpJobMsg(src, trg, hm) => {
+    case CmpJobMsg(src, trg, hm, jobId) => {
+      //println("CmpJobMsg src [" +src.getName +"] " +"trg [" +trg.getName +"]")
       if (activeJobs < numberOfActors) {
         activeJobs += 1
-        router.route(new CmpJobMsg(src, trg, hm), self)
-      } else jobQue += new CmpJobMsg(src, trg, hm)
+        router.route(new CmpJobMsg(src, trg, hm, jobId), self)
+      } else jobQue += new CmpJobMsg(src, trg, hm, jobId)
     }
 
-    case CmpJobCompleteMsg(src, trg) => {
-      println("JobComplete [" +src.getName +"][" +trg.getName +"]")
+    case CmpJobCompleteMsg(src, trg, jobId) => {
+      //println("JobComplete (" +jobId.toString +")")//[" +src.getName +"][" +trg.getName +"]")
       //println("active " +activeJobs +" jobQue " +jobQue.size)
       activeJobs -= 1
       if (jobQue.isEmpty && activeJobs == 0)
@@ -183,24 +203,19 @@ class CmpSupervisor extends Actor {
 
 object util {
 
-  val fsep = File.separator +File.separator
+  var nextId = 0
 
-  def cmpFileName(fbas: File, ftrg: File): Boolean = {
-    println("cmpfilename +[" +fbas.getName +"][" +ftrg.getName +"]")
-    val fn = fbas.getName
-    if (0 < fn.length && fn.compareTo(ftrg.getName) == 0)
-      true
-    else
-      false
-  } //-----------------------------------------------------
+  def getNextId(): Int = {
+    nextId += 1
+    nextId
+  }
 
-  def parseCmdArgs(args : Array[String],
+  def parseCmdArgs(args: Array[String],
                    files: ListBuffer[String],
-                   parms: HashMap[String, String])
-  {
-    println("parseCmdArgs")
+                   parms: HashMap[String, String]) {
     if (2 <= args.length) {
       var curFileType = "glb"
+      parms += (curFileType -> curFileType)
       files ++= args.filter(!_.contains("=")).toList
       var cmds = args.toList.drop(files.length)
 
@@ -208,64 +223,74 @@ object util {
       while (!cmds.isEmpty) {
         val cmd = cmds.head.split('=')
         if (cmd.length == 2) {
-          if (cmd(0).compareToIgnoreCase("ftype") != 0) {
-            parms += ((curFileType + "." + cmd(0)) -> cmd(1))
+          if (cmd(0).compareToIgnoreCase("ftype") == 0) {
+            curFileType = cmd(1)
             parms += (curFileType -> curFileType)
           }
-          else curFileType = cmd(1)
+          else
+            parms += ((curFileType + "." + cmd(0)) -> cmd(1))
         }
         cmds = cmds.tail
       }
     }
+  } //--------------------------------------
 
-
-
-  }//--------------------------------------
 
   def GenCmpJobs(files: List[String],
                  cmds: HashMap[String, String],
-                 supervisor: ActorRef)
-  {
-    def go(fsrc: File, ftrg: File,
-           cmds: HashMap[String, String],
-           supervisor: ActorRef)
-    {
-      if (fsrc.isDirectory && ftrg.isDirectory) {
-        val mapTrg = ftrg.listFiles.map(f => (f.getName, Some(f))).toMap
-        var srcList = fsrc.listFiles
+                 supervisor: ActorRef) {
+    if (2 <= files.length) {
 
-        while (!srcList.isEmpty) {
-          val src = srcList.head
-          val trg = mapTrg.apply(src.getName)
-          trg match {
-            case Some(f) => {
-              if (f.isDirectory && src.isDirectory)
-                go(src, f, cmds, supervisor)
-              else if (f.isFile && src.isFile)
-                supervisor ! new CmpJobMsg(src, f, cmds)
-              else {
-                println("[" + src.getPath + "] is " + (if (src.isDirectory) " is dir." else " is file."))
-                println("[" + f.getPath + "] is " + (if (f.isDirectory) " is dir." else " is file."))
-              }
-            }
-            case _ => {
-              println("could not find " + src.getName + " in target list.")
+      val fbasis = new File(files.head)
+      val fileCmps = for (fn <- files.tail) yield (new File(fn))
+
+      if (fbasis.isFile)
+        fileCmps.foreach(f => if (f.isFile) supervisor ! new CmpJobMsg(fbasis, f, cmds, getNextId))
+      else {
+        var fcmps = fileCmps
+        val basDirSplitList = fbasis.listFiles.partition(f => f.isFile)
+        while (!fcmps.isEmpty) {
+          val fcmp = fcmps.head
+          if (fcmp.isDirectory) {
+            val cmpSplit = fcmp.listFiles.partition(f => f.isFile)
+            val fMap = cmpSplit._1.foldLeft(new HashMap[String, File]) { (acc, f) => (acc += (f.getName -> f))}
+            val dMap = cmpSplit._2.foldLeft(new HashMap[String, File]) { (acc, f) => (acc += (f.getName -> f))}
+
+            basDirSplitList._1.foreach(f => fMap.get(f.getName) match {
+              case Some(cf) => supervisor ! new CmpJobMsg(f, cf, cmds, getNextId)
+              case _ => ()
+            })
+
+            var dirJobs = basDirSplitList._2.foldLeft(new ListBuffer[CmpJob]) {
+              (acc, d) => dMap.get(d.getName) match {
+                  case Some(df) => acc += new CmpJob(d, df)
+                  case _ => acc
+            }}
+
+            while (!dirJobs.isEmpty) {
+
+              val dj = dirJobs.remove(0)
+
+              val bSplitList = dj.bas.listFiles.partition(f => f.isFile)
+              val cSplitList = dj.trg.listFiles.partition(f => f.isFile)
+              val f_map = cSplitList._1.foldLeft(HashMap[String, File]()) { (acc, f) => (acc += (f.getName -> f))}
+              val d_map = cSplitList._2.foldLeft(HashMap[String, File]()) { (acc, f) => (acc += (f.getName -> f))}
+
+              bSplitList._1.foreach(f => f_map.get(f.getName) match {
+                case Some(cf) => supervisor ! new CmpJobMsg(f, cf, cmds, getNextId)
+                case _ => ()
+              })
+
+              dirJobs ++= bSplitList._2.foldLeft(new ListBuffer[CmpJob]) {
+                (acc, d) => d_map.get(d.getName) match {
+                  case Some(df) => acc += new CmpJob(d, df)
+                  case _ => acc
+                }}
             }
           }
-          srcList = srcList.tail
+          fcmps = fcmps.tail
         }
       }
     }
-
-    if (2 <= files.length) {
-      val fsrc = new File(files.head)
-      var flist = files.tail
-      while (!flist.isEmpty) {
-        val ftrg = new File(flist.head)
-        go(fsrc, ftrg, cmds, supervisor)
-        flist = flist.tail
-      }
-    }
-  }
-
+  }//--------------------------------------------
 }
