@@ -1,19 +1,24 @@
 
+package com.ngs.cmp.cmpMain
+/**
+ * Created by ngsmith on 8/29/2015.
+ */
 
-package com.ngs.cmp
-
-import com.ngs.cmp.Actors._
-import scala.collection.mutable.ListBuffer
-import scala.collection.mutable.HashMap
+import com.typesafe.config.ConfigFactory
+import akka.actor._
 import akka.actor.ActorSystem
 
+import com.ngs.cmp.cmpUtils._
+import com.ngs.cmp.cmpUtils
+import com.ngs.cmp.cmpActors._
+import com.ngs.cmp.cmpActors.CmpSupervisor
+
+import scala.collection.mutable.{HashMap, ListBuffer}
+
 object CmpMain extends App {
+  val system = ActorSystem("CmpSupervisor")
+  val supervisor = system.actorOf(CmpSupervisor.props)
 
-  val sys = ActorSystem("DirCmpSystem")
-  val supervisor = sys.actorOf(CmpSupervisor.props, name = "CmpSupervisor")
-  val parms = new HashMap[String, String]
-  val files = new ListBuffer[String]
-
-  util.parseCmdArgs(args, files, parms)
-  util.GenCmpJobs(files.toList, parms, supervisor)
+  cmpUtils.CmpDirUtils.GenCmpJobs(supervisor)
 }
+
