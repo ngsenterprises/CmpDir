@@ -74,13 +74,25 @@ object CmpDirUtils {
     }
   }
 
-  case class ParmListString(parm: List[String])
   def getCfgStringListOrElse(skey: String, sldef: List[String]): List[String] = {
     val cfg = ConfigFactory.load("application.conf")
-    val res = Try(cfg.getStringList(skey))
-    res match {
-      case Failure( _ ) => sldef
-      case Success( _ ) => res.get.asInstanceOf[List[String]]
+    var strListRef:java.util.List[String] = new java.util.LinkedList[String]()
+    try {
+      strListRef = cfg.getStringList(skey)
+    } catch {
+      case x: Exception if (NonFatal(x)) => strListRef = new java.util.LinkedList[String]()
+      case x: Throwable => throw x
+    }
+
+    if (strListRef == null) List[String]() else {
+      val maxIndex = strListRef.size()
+      var index = 0
+      val buf = new scala.collection.mutable.ListBuffer[String]()
+      while (index < maxIndex) {
+        buf += strListRef.get(index)
+        index += 1
+      }
+      buf.toList
     }
   }
 
