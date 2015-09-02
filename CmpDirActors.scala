@@ -1,25 +1,34 @@
+package com.ngs.cmp.cmpActors
 
-package com.ngs.cmp.Actors
+import java.io.{File, FileWriter}
 
-import java.io.{FileWriter, File}
+import akka.actor.{Actor, ActorRef, Props, OneForOneStrategy, SupervisorStrategy}
+import akka.actor.SupervisorStrategy._
+import akka.actor.SupervisorStrategy.restart
 
-import akka.actor.SupervisorStrategy.{Escalate, Resume, Restart}
-import akka.actor.{OneForOneStrategy, Actor, Props, ActorRef}
-import akka.routing.{RoundRobinRoutingLogic, Router, ActorRefRoutee}
-import com.typesafe.config.ConfigFactory
-import scala.collection.mutable
+import akka.routing.{ActorRefRoutee, Router, RoundRobinRoutingLogic}
+
+
+
+
+import scala.collection.immutable.{HashMap, List}
 import scala.io.Source
 import scala.util.control.NonFatal
-import scala.collection.mutable.{ListBuffer, Queue, HashMap}
-import scala.annotation._
+import scala.collection.mutable.{ListBuffer, Queue}
 
 
 sealed trait CmpMsg
-case class CmpJobMsg(bas: File, cmp: File, cmds: HashMap[String, String], jobId: Int) extends CmpMsg
+case class CmpJobMsg(bas: File, cmp: File, cmds: cmdParm, jobId: Int) extends CmpMsg
 case class CmpJobCompleteMsg(bas: File, cmp: File, jobId: Int) extends CmpMsg
 case object StopSystemMsg extends CmpMsg
 
 case class CmpJob(bas: File, trg: File)
+case class cmdParm(
+  skipHdr: Boolean,
+  startLine: Int,
+  maxLines: Int,
+  maxErrors: Int
+)
 
 
 object CmpFileActor {
@@ -28,11 +37,9 @@ object CmpFileActor {
 
 class CmpFileActor extends Actor {
 
-  def cmpFiles(bas: File, trg: File, cmds: HashMap[String, String]): Long = {
-   //println("cmpFiles [" +bas.getAbsolutePath +"]" +" [" +trg.getAbsolutePath +"]")
-
+  def cmpFiles(bas: File, trg: File, cmds: cmdParm): Long = {
+    //println("cmpFiles [" +bas.getAbsolutePath +"]" +" [" +trg.getAbsolutePath +"]")
     var error_count = 0
-
     try {
       if (bas.isFile && trg.isFile) {
         val srcBas = Source.fromFile(bas).getLines
@@ -44,10 +51,10 @@ class CmpFileActor extends Actor {
         val lineTrg = new StringBuilder
         val suffix = bas.getAbsolutePath.split('.').last
 
-        val skip_hdr = cmds.contains("glb.fhdr") || cmds.contains(suffix + ".fhdr")
-        val start_line = cmds.getOrElse("glb.fstart", cmds.getOrElse(suffix + ".fstart", "0")).toLong
-        val max_lines = cmds.getOrElse("glb.flines", cmds.getOrElse(suffix + ".flines", Long.MaxValue.toString)).toLong
-        val max_errors = cmds.getOrElse("glb.ferror", cmds.getOrElse(suffix + ".ferror", Long.MaxValue.toString)).toLong
+//        val skip_hdr = cmds.contains("glb.fhdr") || cmds.contains(suffix + ".fhdr")
+//        val start_line = cmds.getOrElse("glb.fstart", cmds.getOrElse(suffix + ".fstart", "0")).toLong
+//        val max_lines = cmds.getOrElse("glb.flines", cmds.getOrElse(suffix + ".flines", Long.MaxValue.toString)).toLong
+//        val max_errors = cmds.getOrElse("glb.ferror", cmds.getOrElse(suffix + ".ferror", Long.MaxValue.toString)).toLong
 
         def getBasStr: Boolean = {
           try {
@@ -78,7 +85,7 @@ class CmpFileActor extends Actor {
         var bTrg = getTrgStr
 
         //skip header
-        if (skip_hdr) {
+        if (cmds.skipHdr) {
           var done = false
           while (bBas && !done) {
             if (0 < lineBas.length && lineBas(0) != '#')
@@ -96,13 +103,13 @@ class CmpFileActor extends Actor {
         }
 
         //start line
-        while (line_count < start_line && bBas && bTrg) {
+        while (line_count < cmds.startLine && bBas && bTrg) {
           line_count += 1
           bBas = getBasStr
           bTrg = getTrgStr
         }
 
-        while (line_count < max_lines && error_count < max_errors && bBas && bTrg) {
+        while (line_count < cmds.maxLines && error_count < cmds.maxErrors && bBas && bTrg) {
           if (lineBas.compare(lineTrg.toString) != 0) {
             wrt.write(line_count.toString + "\n")
             wrt.write("[" + lineBas + "]\n")
@@ -147,12 +154,12 @@ class CmpSupervisor extends Actor {
   override def supervisorStrategy =
     OneForOneStrategy() {
       case e: Exception if (NonFatal(e)) => {
-        println("supervisorStrategy RESTART." +e.toString)
-        Restart
+        println("supervisorStrategy RESTART. " +e.toString)
+        restart
       }
-      case e => {
-        println("supervisorStrategy ESCALATE." +e.toString)
-        Escalate
+      case e: Throwable => {
+        println("supervisorStrategy ESCALATE. " +e.toString)
+        escalate
       }
     }
 
@@ -198,99 +205,3 @@ class CmpSupervisor extends Actor {
 }
 
 
-
-
-
-object util {
-
-  var nextId = 0
-
-  def getNextId(): Int = {
-    nextId += 1
-    nextId
-  }
-
-  def parseCmdArgs(args: Array[String],
-                   files: ListBuffer[String],
-                   parms: HashMap[String, String]) {
-    if (2 <= args.length) {
-      var curFileType = "glb"
-      parms += (curFileType -> curFileType)
-      files ++= args.filter(!_.contains("=")).toList
-      var cmds = args.toList.drop(files.length)
-
-      //iterate command list
-      while (!cmds.isEmpty) {
-        val cmd = cmds.head.split('=')
-        if (cmd.length == 2) {
-          if (cmd(0).compareToIgnoreCase("ftype") == 0) {
-            curFileType = cmd(1)
-            parms += (curFileType -> curFileType)
-          }
-          else
-            parms += ((curFileType + "." + cmd(0)) -> cmd(1))
-        }
-        cmds = cmds.tail
-      }
-    }
-  } //--------------------------------------
-
-
-  def GenCmpJobs(files: List[String],
-                 cmds: HashMap[String, String],
-                 supervisor: ActorRef) {
-    if (2 <= files.length) {
-
-      val fbasis = new File(files.head)
-      val fileCmps = for (fn <- files.tail) yield (new File(fn))
-
-      if (fbasis.isFile)
-        fileCmps.foreach(f => if (f.isFile) supervisor ! new CmpJobMsg(fbasis, f, cmds, getNextId))
-      else {
-        var fcmps = fileCmps
-        val basDirSplitList = fbasis.listFiles.partition(f => f.isFile)
-        while (!fcmps.isEmpty) {
-          val fcmp = fcmps.head
-          if (fcmp.isDirectory) {
-            val cmpSplit = fcmp.listFiles.partition(f => f.isFile)
-            val fMap = cmpSplit._1.foldLeft(new HashMap[String, File]) { (acc, f) => (acc += (f.getName -> f))}
-            val dMap = cmpSplit._2.foldLeft(new HashMap[String, File]) { (acc, f) => (acc += (f.getName -> f))}
-
-            basDirSplitList._1.foreach(f => fMap.get(f.getName) match {
-              case Some(cf) => supervisor ! new CmpJobMsg(f, cf, cmds, getNextId)
-              case _ => ()
-            })
-
-            var dirJobs = basDirSplitList._2.foldLeft(new ListBuffer[CmpJob]) {
-              (acc, d) => dMap.get(d.getName) match {
-                  case Some(df) => acc += new CmpJob(d, df)
-                  case _ => acc
-            }}
-
-            while (!dirJobs.isEmpty) {
-
-              val dj = dirJobs.remove(0)
-
-              val bSplitList = dj.bas.listFiles.partition(f => f.isFile)
-              val cSplitList = dj.trg.listFiles.partition(f => f.isFile)
-              val f_map = cSplitList._1.foldLeft(HashMap[String, File]()) { (acc, f) => (acc += (f.getName -> f))}
-              val d_map = cSplitList._2.foldLeft(HashMap[String, File]()) { (acc, f) => (acc += (f.getName -> f))}
-
-              bSplitList._1.foreach(f => f_map.get(f.getName) match {
-                case Some(cf) => supervisor ! new CmpJobMsg(f, cf, cmds, getNextId)
-                case _ => ()
-              })
-
-              dirJobs ++= bSplitList._2.foldLeft(new ListBuffer[CmpJob]) {
-                (acc, d) => d_map.get(d.getName) match {
-                  case Some(df) => acc += new CmpJob(d, df)
-                  case _ => acc
-                }}
-            }
-          }
-          fcmps = fcmps.tail
-        }
-      }
-    }
-  }//--------------------------------------------
-}
